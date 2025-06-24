@@ -43,7 +43,9 @@ def run_phase2(jira_client, airtable_api_token, airtable_base_id, airtable_table
         processed_airtable_record_count += 1
         headline_from_airtable = airtable_fields.get(common_utils.AIRTABLE_HEADLINE_FIELD)
         
-        logging.info(f"Phase 2: Found new Airtable record to process: {record_id} ('{headline_from_airtable}')")
+        sanitized_headline = headline_from_airtable.replace('\n', ' ').strip() if headline_from_airtable else ""
+        logging.info(f"Phase 2: Found new Airtable record to process: {record_id} (\"{sanitized_headline}\")")
+
         action_details = {
             "phase": 2, "type": "Airtable->Jira (New)", "airtable_id": record_id,
             "airtable_summary": headline_from_airtable, "actions": [], "new_jira_key": None, "error": None
@@ -74,7 +76,8 @@ def run_phase2(jira_client, airtable_api_token, airtable_base_id, airtable_table
                 'labels': [common_utils.JIRA_CRO_LABEL]
             }
             action_details["actions"].append(f"Jira: Plan to create issue with summary '{target_jira_headline}'.")
-            logging.info(f"  [Plan] Jira: Create issue with summary '{target_jira_headline}'")
+            logging.info(f"Phase 2: Creating Jira issue with summary \"{sanitized_headline}\"")
+
             if common_utils.SCRIPT_DEBUG_MODE:
                 logging.debug(f"    [Debug] Full Jira issue data to be created: {json.dumps(issue_dict, indent=2)}")
 
