@@ -19,18 +19,21 @@ if not load_dotenv():
 DRY_RUN = os.getenv('DRY_RUN', 'False').lower() == 'true'
 SCRIPT_DEBUG_MODE = os.getenv('SCRIPT_DEBUG_MODE', 'False').lower() == 'true'
 LOG_LEVEL = logging.DEBUG if SCRIPT_DEBUG_MODE else logging.INFO
+QA_REPORT_INCLUDE_DESCRIPTION_FLAG = os.getenv('QA_REPORT_INCLUDE_DESCRIPTION', 'False').lower() == 'true'
+
 
 ENABLE_PHASE1 = os.getenv('ENABLE_PHASE1_JIRA_TO_AIRTABLE', 'False').lower() == 'true'
 ENABLE_PHASE2 = os.getenv('ENABLE_PHASE2_AIRTABLE_TO_JIRA', 'False').lower() == 'true'
 ENABLE_PHASE3 = os.getenv('ENABLE_PHASE3_TWO_WAY_SYNC', 'False').lower() == 'true'
 ENABLE_SPRINT_MANAGEMENT = os.getenv('ENABLE_SPRINT_MANAGEMENT_IN_PHASE3', 'False').lower() == 'true'
 ENABLE_COMMENT_SYNC = os.getenv('ENABLE_TWO_WAY_COMMENT_SYNC', 'False').lower() == 'true'
-
+ENABLE_JIRA_FIELD_SYNC_FROM_AIRTABLE = os.getenv('ENABLE_JIRA_FIELD_SYNC_FROM_AIRTABLE', 'True').lower() == 'true'
 
 # --- AIRTABLE CONFIG (from .env) ---
 AIRTABLE_BASE_ID_CONFIG = os.getenv('AIRTABLE_BASE_ID') # Renamed to avoid conflict with function arg
 AIRTABLE_TABLE_NAME_CONFIG = os.getenv('AIRTABLE_TABLE_NAME')
 AIRTABLE_TOKEN_CONFIG = os.getenv('AIRTABLE_PERSONAL_ACCESS_TOKEN')
+AIRTABLE_LAST_MODIFIED_FIELD_NAME = os.getenv('AIRTABLE_LAST_MODIFIED_FIELD_NAME')
 
 # Main Table Fields
 AIRTABLE_HEADLINE_FIELD = os.getenv('AIRTABLE_HEADLINE_FIELD_NAME', "Full Name")
@@ -58,6 +61,7 @@ AIRTABLE_TYPE_OF_TEST_FIELD = os.getenv('AIRTABLE_TYPE_OF_TEST_FIELD')
 AIRTABLE_PLANNED_START_DATE_FIELD = os.getenv('AIRTABLE_PLANNED_START_DATE_FIELD')
 AIRTABLE_ESTIMATED_END_DATE_FIELD = os.getenv('AIRTABLE_ESTIMATED_END_DATE_FIELD')
 AIRTABLE_GOAL_FIELD = os.getenv('AIRTABLE_GOAL_FIELD') # For Cluster mapping
+AIRTABLE_IDEA_NAME_FIELD = os.getenv('AIRTABLE_IDEA_NAME_FIELD')
 
 # Statuses for processing
 AIRTABLE_STATUSES_FOR_JIRA_CREATION_LIST = [s.strip() for s in os.getenv('AIRTABLE_STATUSES_FOR_JIRA_CREATION', "Idea: Evaluated").split(',')]
@@ -65,12 +69,16 @@ AIRTABLE_STATUSES_FOR_SYNC_LIST = [s.strip() for s in os.getenv('AIRTABLE_STATUS
 
 
 # --- JIRA CONFIG (from .env) ---
-JIRA_PROJECT_KEY_CONFIG = os.getenv('JIRA_PROJECT_KEY') # Renamed to avoid conflict
+JIRA_PROJECT_KEY_CONFIG = os.getenv('JIRA_PROJECT_KEY') 
+JIRA_BOARD_NAME_CONFIG = os.getenv('JIRA_BOARD_NAME')
 JIRA_ISSUE_TYPE_NAME_CONFIG = os.getenv('JIRA_ISSUE_TYPE_NAME')
 JIRA_CRO_INTAKE_FORM_KEY = os.getenv('JIRA_CRO_INTAKE_FORM_ISSUE_KEY')
 JIRA_CRO_LABEL = os.getenv('JIRA_CRO_PLANNING_LABEL')
 JIRA_NEW_ISSUE_STATUS = os.getenv('JIRA_NEW_CRO_ISSUE_INITIAL_STATUS')
-JIRA_NOT_EVALUATED_PREFIX_CONST = os.getenv('JIRA_NOT_EVALUATED_PREFIX') # Renamed
+JIRA_NOT_EVALUATED_PREFIX_CONST = os.getenv('JIRA_NOT_EVALUATED_PREFIX')
+JIRA_BOARD_ID_CONFIG = os.getenv('JIRA_BOARD_ID_FOR_SPRINTS')
+print(f"DEBUG from common_utils.py: JIRA_BOARD_ID_CONFIG loaded as: '{JIRA_BOARD_ID_CONFIG}'") # <-- ADD THIS DEBUG PRINT
+
 
 # Jira Custom Fields
 JIRA_AIRTABLE_ID_CF = os.getenv('JIRA_AIRTABLE_RECORD_ID_CUSTOM_FIELD') # Critical for matching
@@ -107,10 +115,10 @@ AIRTABLE_GOAL_DISPLAY_FIELD = os.getenv('AIRTABLE_GOAL_DISPLAY_FIELD_NAME')
 
 
 # --- MAPPINGS ---
-STATUS_MAPPING_AIRTABLE_TO_JIRA = {
+STATUS_MAPPING_AIRTABLE_TO_JIRA = { 
     "Idea: Evaluated": "Backlog", "Idea: Planning": "Plan",
-    "Deploy: Design/Configure/Dev": "Build", "Build: QA": "Deploy",
-    "Monitor": "Test in progress", "Learn: Analysis>Recs>Act": "Test completed",
+    "Deploy: Design/Configure/Dev": "Build", "Build: QA": "QA", "Build: QA Stakeholders" : "QA",
+    "Monitor": "Test in progress", "Learn: Analysis>Recs>Act": "Detailed Analysis",
     "Finalised": "Closed", "Idea: Backlog": "Backlog" # Added for Phase 1
 }
 STATUS_MAPPING_JIRA_TO_AIRTABLE = {v: k for k, v in STATUS_MAPPING_AIRTABLE_TO_JIRA.items()}
@@ -168,7 +176,7 @@ def get_global_airtable_client():
 
 def get_linked_record_display_values(record_id_list, linked_table_name_or_id, target_field_in_linked_table):
     # Uses get_global_airtable_client() and AIRTABLE_BASE_ID_CONFIG
-    # ... (Full function body as provided previously, ensuring it uses the global client and base ID config)
+    
     client = get_global_airtable_client()
     if not client:
         logging.error("Airtable API client not initialized in get_linked_record_display_values.")
@@ -177,12 +185,12 @@ def get_linked_record_display_values(record_id_list, linked_table_name_or_id, ta
     if not linked_table_name_or_id or not target_field_in_linked_table:
         logging.warning(f"Missing linked table/field config for IDs: {record_id_list}. Returning IDs.")
         return [str(rid) for rid in record_id_list]
-    # ... (rest of function)
+    
     display_values = []
     try:
         linked_table = client.table(AIRTABLE_BASE_ID_CONFIG, linked_table_name_or_id)
         for record_id in record_id_list:
-            # ... (rest of the loop from previous correct version) ...
+            
             if not isinstance(record_id, str) or not record_id.startswith('rec'):
                 logging.warning(f"Invalid record ID format for linked record: {record_id}")
                 display_values.append(str(record_id))
@@ -205,10 +213,10 @@ def get_linked_record_display_values(record_id_list, linked_table_name_or_id, ta
 
 def get_user_emails_from_airtable(user_identifiers_list_or_str):
     # Uses AIRTABLE_USERS_TABLE, AIRTABLE_USERS_EMAIL_FIELD
-    # ... (Full function body as provided previously) ...
+    
     if not user_identifiers_list_or_str: return []
     actual_list = []
-    # ... (handle string vs list for user_identifiers_list_or_str as before) ...
+    
     if isinstance(user_identifiers_list_or_str, str):
         if ',' in user_identifiers_list_or_str and not user_identifiers_list_or_str.startswith('rec'):
             actual_list = [s.strip() for s in user_identifiers_list_or_str.split(',')]
@@ -241,7 +249,7 @@ def get_user_emails_from_airtable(user_identifiers_list_or_str):
 
 
 def get_jira_account_id(jira_client, email_identifier):
-    # ... (Full function body as provided previously) ...
+    
     if not email_identifier or not isinstance(email_identifier, str) or '@' not in email_identifier:
         logging.warning(f"Invalid email for Jira user lookup: {email_identifier}")
         return None
@@ -266,7 +274,7 @@ def get_jira_account_id(jira_client, email_identifier):
 
 
 def format_jira_description_table_from_airtable(airtable_fields):
-    # ... (Full function body as provided previously, using the env var constants for field names and linked configs) ...
+
     # This function now needs to be more dynamic based on the loaded config variables.
     table_rows = ["| Problem or Opportunity | Answers (incl phase) |", "| :--------------------- | :------------------- |"]
 
@@ -347,46 +355,46 @@ def format_jira_description_table_from_airtable(airtable_fields):
 
 
 def parse_jira_description_table_to_airtable_fields(description_string):
-    # ... (Full function body as provided previously, ensure it uses JIRA_DESC_TABLE_TO_AIRTABLE_MAP and COUNTRY_NAME_TO_ISO) ...
+
     parsed_data = {}
     if not description_string: return parsed_data
-    lines = description_string.splitlines()
+    # lines = description_string.splitlines()
+        # 1. Clean up Jira's special panel syntax
+    cleaned_description = re.sub(r"\{panel:.*?\}", "", description_string)
+    cleaned_description = re.sub(r"h3\.\s*\+\*.*?\*+\+", "", cleaned_description) # Remove h3 header lines
+    # 2. Use a more flexible regex to find the table rows
+    # This looks for a pipe, optional whitespace, two asterisks, the key, two asterisks,
+    # another pipe, and then captures everything until the next pipe.
+    row_pattern = re.compile(r"\|\s*\*\*(.*?)\*\*.*?\s*\|\s*(.*?)\s*\|")
     # This parsing is fragile. It assumes a consistent two-column markdown table.
     # | **Jira Header** | Value |
-    for line in lines:
-        if not line.strip().startswith("| **"): continue
-        parts = [part.strip() for part in line.split('|')]
-        if len(parts) >= 4: # e.g. ['', '**Jira Header**', 'Value', '']
-            jira_header_text = parts[1].replace("**", "").strip()
-            raw_value = parts[2].strip()
+    for match in row_pattern.finditer(cleaned_description):
+        jira_key_display = match.group(1).strip() # e.g., "1. Observation"
+        raw_value = match.group(2).strip()
 
-            # Find the corresponding Airtable field variable name
-            airtable_field_var_name = JIRA_DESC_TABLE_TO_AIRTABLE_MAP.get(jira_header_text)
-            if airtable_field_var_name:
-                # Get the actual Airtable field name string using the variable name
-                airtable_field_name = globals().get(airtable_field_var_name)
-                if airtable_field_name:
-                    # Reverse transformations
-                    if airtable_field_name == AIRTABLE_COUNTRY_FIELD: # Map Country Name back to ISO
-                        parsed_data[airtable_field_name] = COUNTRY_NAME_TO_ISO.get(raw_value, raw_value)
-                    # Add other reverse transformations if needed (e.g., for multi-select, dates)
-                    else:
-                        parsed_data[airtable_field_name] = raw_value
+        # Find the corresponding Airtable field variable name from our map
+        airtable_field_var_name = JIRA_DESC_TABLE_TO_AIRTABLE_MAP.get(jira_key_display)
+        if airtable_field_var_name:
+            airtable_field_name = globals().get(airtable_field_var_name)
+            if airtable_field_name:
+                # Reverse transformations if needed
+                if airtable_field_name == AIRTABLE_COUNTRY_FIELD:
+                    parsed_data[airtable_field_name] = COUNTRY_NAME_TO_ISO.get(raw_value, raw_value)
                 else:
-                    logging.warning(f"Jira desc key '{jira_header_text}' mapped to unknown Airtable field var '{airtable_field_var_name}'")
-            elif jira_header_text == "Airtable Test ID": # Special case if we add this to desc
-                 parsed_data[AIRTABLE_TEST_ID_FIELD] = raw_value # Assuming Test ID is simple text
+                    parsed_data[airtable_field_name] = raw_value
 
     logging.debug(f"Parsed Jira description into Airtable fields: {parsed_data}")
     return parsed_data
 
 
 def find_jira_transition_id_by_name(jira_client, issue_key, target_status_name):
-    # ... (Full function body as provided previously) ...
+    """Finds a transition ID by the target status name."""
     try:
         transitions = jira_client.transitions(issue_key)
         for t in transitions:
-            if t['to'].name.lower() == target_status_name.lower():
+            # The 'to' key contains a dictionary. Access its 'name' key.
+            if t['to']['name'].lower() == target_status_name.lower():
+            # -------------------------
                 return t['id']
         logging.warning(f"No transition found to target status '{target_status_name}' for issue {issue_key}.")
     except JIRAError as e:
@@ -395,14 +403,12 @@ def find_jira_transition_id_by_name(jira_client, issue_key, target_status_name):
 
 
 def get_experiment_wxx_txx_id(text_string):
-    # ... (Full function body as provided previously) ...
     if not text_string: return None
     match = re.search(r"(W\d+T\d+)", text_string, re.IGNORECASE)
     return match.group(1).upper() if match else None
 
 
 def construct_jira_headline(exp_id, country_iso, page_type_val, name_val):
-    # ... (Full function body as provided previously) ...
     # Name val should be the core idea name, not the full existing headline
     parts = []
     if exp_id: parts.append(exp_id)
@@ -421,7 +427,7 @@ def construct_jira_headline(exp_id, country_iso, page_type_val, name_val):
 
 
 def format_date_for_jira(date_str):
-    # ... (Full function body as provided previously) ...
+
     if not date_str: return None
     try:
         # Handle Airtable's format 'YYYY-MM-DDTHH:MM:SS.sssZ' or simple 'YYYY-MM-DD'
@@ -440,7 +446,7 @@ def format_date_for_jira(date_str):
 
 
 def format_date_for_airtable(date_str):
-    # ... (Full function body as provided previously) ...
+    
     # Airtable Date field (without time) accepts 'YYYY-MM-DD'
     if not date_str: return None
     try:
@@ -450,29 +456,53 @@ def format_date_for_airtable(date_str):
         logging.warning(f"Invalid date format for Airtable: {date_str} (expected YYYY-MM-DD)")
         return None
 
+def add_comment_to_airtable(airtable_client, record_id, new_comment_text):
+    """
+    Fetches existing comments from an Airtable record and appends a new one.
+    """
+    try:
+        # First, get the existing record to read the current comments
+        record = airtable_client.get(record_id)
+        existing_comments = record.get('fields', {}).get('Comments', '')
+        
+        # Append the new comment with a clear separator
+        if existing_comments:
+            updated_comments = existing_comments + "\n\n---\n\n" + new_comment_text
+        else:
+            updated_comments = new_comment_text
+            
+        # Update the record with the new comment string
+        airtable_client.update(record_id, {'Comments': updated_comments})
+        logging.info(f"Successfully added comment to Airtable record {record_id}.")
+    except Exception as e:
+        logging.error(f"Failed to add comment to Airtable record {record_id}. Error: {e}")
+
+
 def format_full_jira_description(airtable_record_id, airtable_fields, airtable_base_id_for_url, airtable_table_id_or_name_for_url):
     """
-    Formats the entire Jira description, including the main content table
-    and the appended metadata block.
+    Formats the entire Jira description using Jira's native wiki-style table format.
     """
-    # 1. Generate the main description table (from existing logic)
-    # This function 'format_jira_description_table_from_airtable' needs to be defined
-    # or its logic integrated here. Let's assume it's here for now.
+    table_rows = ["||Problem or Opportunity||Answers (incl phase)||"]
     
-    # --- Start of format_jira_description_table_from_airtable logic ---
-    table_rows = ["| Problem or Opportunity | Answers (incl phase) |", "| :--------------------- | :------------------- |"]
-    def get_resolved_value_for_desc(airtable_field_var_name_str):
+    def get_resolved_value_for_desc(airtable_field_var_name_str, fields_dict):
+        """
+        Internal helper to resolve values for the description table.
+        This now correctly accepts two arguments.
+        """
         airtable_field_name = globals().get(airtable_field_var_name_str)
         if not airtable_field_name:
-            logging.warning(f"Airtable field name variable '{airtable_field_var_name_str}' not found in common_utils config.")
+            logging.warning(f"Config variable '{airtable_field_var_name_str}' not found.")
             return "[CONFIG_ERROR]"
+        
+        # This logic dynamically checks the linked status based on the field name variable.
+        # It constructs the name of the config flags (e.g., AIRTABLE_SITE_IS_LINKED from AIRTABLE_COUNTRY_FIELD)
         raw_value = airtable_fields.get(airtable_field_name)
         if raw_value is None: return ""
-
-        is_linked = False
-        linked_table_name = None
-        display_field_name = None
-
+        
+        is_linked = globals().get(f"{airtable_field_var_name_str.replace('_FIELD', '')}_IS_LINKED", False)
+        linked_table = globals().get(f"{airtable_field_var_name_str.replace('_FIELD', '')}_LINKED_TABLE")
+        display_field = globals().get(f"{airtable_field_var_name_str.replace('_FIELD', '')}_DISPLAY_FIELD")
+        
         # Dynamically check linked status based on the field name
         # This requires a mapping or a series of if/elifs for each configurable linked field
         if airtable_field_name == AIRTABLE_COUNTRY_FIELD:
@@ -511,40 +541,35 @@ def format_full_jira_description(airtable_record_id, airtable_fields, airtable_b
         
         return str(raw_value) if not isinstance(raw_value, list) else ', '.join(map(str, raw_value))
 
-    for airtable_field_var, jira_header in AIRTABLE_TO_JIRA_DESC_TABLE_MAP.items(): # Uses the map from common_utils
-        value = get_resolved_value_for_desc(airtable_field_var) # Pass the string name of the global var
-        value_sanitized = value.replace("|", "\\|").replace("\n", " ")
-        table_rows.append(f"| **{jira_header}** | {value_sanitized} |")
-    
+    for airtable_field_var, jira_header in AIRTABLE_TO_JIRA_DESC_TABLE_MAP.items():
+        value = get_resolved_value_for_desc(airtable_field_var, airtable_fields) # Pass airtable_fields
+        # Sanitize value for wiki table (Jira escapes | with ||, but it's safer to avoid them)
+        value_sanitized = value.replace("|", " ").replace("\n", " ")
+        # The key is now bolded with asterisks, which Jira wiki markup understands
+        table_rows.append(f"|*{jira_header}*|{value_sanitized}|")
+
     main_description_table = "\n".join(table_rows)
-    # --- End of format_jira_description_table_from_airtable logic ---
 
-    # 2. Construct the metadata block
-    metadata_lines = [f"\n\n{METADATA_BLOCK_HEADER}"] # Start with a newline for separation
-
-    if airtable_record_id:
-        metadata_lines.append(f"{METADATA_REC_ID_PREFIX}{airtable_record_id}")
-
+    metadata_lines = [f"\n\n{METADATA_BLOCK_HEADER}"]
+    if airtable_record_id: metadata_lines.append(f"{METADATA_REC_ID_PREFIX}{airtable_record_id}")
     experiment_id = airtable_fields.get(AIRTABLE_EXPERIMENT_ID_FIELD)
-    if experiment_id: # This now comes from airtable_fields
-        metadata_lines.append(f"{METADATA_EXP_ID_PREFIX}{experiment_id}")
-    
-    # Construct Airtable URL
-    # Ensure airtable_base_id_for_url and airtable_table_id_or_name_for_url are the actual IDs
+    if experiment_id: metadata_lines.append(f"{METADATA_EXP_ID_PREFIX}{experiment_id}")
     if airtable_record_id and airtable_base_id_for_url and airtable_table_id_or_name_for_url:
         airtable_url = f"https://airtable.com/{airtable_base_id_for_url}/{airtable_table_id_or_name_for_url}/{airtable_record_id}"
         metadata_lines.append(f"{METADATA_URL_PREFIX}{airtable_url}")
 
-    if len(metadata_lines) > 1: # If any metadata was added
-        # metadata_lines.append(METADATA_BLOCK_FOOTER) # Optional footer
-        return main_description_table + "\n" + "\n".join(metadata_lines)
+    if len(metadata_lines) > 1:
+        return main_description_table + "\n".join(metadata_lines)
     else:
         return main_description_table
+    # --- End of format_jira_description_table_from_airtable logic ---
+
+
 
 
 def parse_metadata_from_jira_description(description_string):
     """
-    Parses the metadata block from the Jira description.
+    Parses the metadata block from the Jira description using more flexible regex.
     Returns a dictionary with 'airtable_record_id', 'experiment_id', 'airtable_url'.
     """
     metadata = {
@@ -555,30 +580,28 @@ def parse_metadata_from_jira_description(description_string):
     if not description_string:
         return metadata
 
-    # Attempt to find the metadata block more robustly
-    # This regex looks for the header and captures everything until a potential footer or end of string
-    # It's non-greedy for the content part (.*?)
-    # metadata_block_match = re.search(rf"{re.escape(METADATA_BLOCK_HEADER)}(.*?)(?:{re.escape(METADATA_BLOCK_FOOTER)}|$)", description_string, re.DOTALL)
-    
-    # Simpler: search for known prefixes within the whole description if block markers are unreliable
-    # This might be safer if users edit the description heavily.
-    
-    rec_id_match = re.search(rf"^{re.escape(METADATA_REC_ID_PREFIX)}(rec[a-zA-Z0-9]{{14}})$", description_string, re.MULTILINE)
+    # Regex patterns that allow for optional leading whitespace (`\s*`)
+    # and look for the prefix anywhere in a line (`re.MULTILINE`).
+    rec_id_pattern = rf"^\s*{re.escape(METADATA_REC_ID_PREFIX)}(rec[a-zA-Z0-9]{{14}})"
+    exp_id_pattern = rf"^\s*{re.escape(METADATA_EXP_ID_PREFIX)}(W\d+T\d+)"
+    url_pattern = rf"^\s*{re.escape(METADATA_URL_PREFIX)}(https://airtable\.com/\S+)"
+
+    rec_id_match = re.search(rec_id_pattern, description_string, re.MULTILINE | re.IGNORECASE)
     if rec_id_match:
         metadata['airtable_record_id'] = rec_id_match.group(1)
 
-    exp_id_match = re.search(rf"^{re.escape(METADATA_EXP_ID_PREFIX)}(W\d+T\d+)$", description_string, re.IGNORECASE | re.MULTILINE)
+    exp_id_match = re.search(exp_id_pattern, description_string, re.MULTILINE | re.IGNORECASE)
     if exp_id_match:
         metadata['experiment_id'] = exp_id_match.group(1).upper()
 
-    url_match = re.search(rf"^{re.escape(METADATA_URL_PREFIX)}(https://airtable\.com/[^/\s]+/[^/\s]+/\S+)$", description_string, re.MULTILINE)
+    url_match = re.search(url_pattern, description_string, re.MULTILINE | re.IGNORECASE)
     if url_match:
         metadata['airtable_url'] = url_match.group(1)
     
-    if metadata['airtable_record_id'] or metadata['experiment_id'] or metadata['airtable_url']:
+    if metadata['airtable_record_id']: # Log if we found the most important piece
         logging.debug(f"Parsed metadata from Jira description: {metadata}")
     else:
-        logging.debug("No Airtable metadata block found or parsed from Jira description.")
+        logging.debug("No Airtable Record ID metadata found or parsed from Jira description.")
         
     return metadata
 
@@ -598,5 +621,27 @@ def construct_jira_headline(exp_id, country_iso, page_type_val, name_val, curren
     if current_prefix and current_prefix.strip(): # e.g., "[NOT EVALUATED]"
         return f"{current_prefix.strip()} {main_headline_part}"
     return main_headline_part
+
+def get_resolved_value_for_sync(raw_value, is_linked_config, linked_table_config, display_field_config):
+    """A generic helper to resolve a potentially linked Airtable value."""
+    if raw_value is None:
+        return None
+    
+    if is_linked_config and linked_table_config and display_field_config:
+        ids_to_resolve = []
+        if isinstance(raw_value, list) and all(isinstance(item, str) and item.startswith('rec') for item in raw_value):
+            ids_to_resolve = raw_value
+        elif isinstance(raw_value, str) and raw_value.startswith('rec'):
+            ids_to_resolve = [raw_value]
+
+        if ids_to_resolve:
+            resolved_items = get_linked_record_display_values(ids_to_resolve, linked_table_config, display_field_config)
+            # Return the first item for single-value fields, or a joined string for multi-value
+            return resolved_items[0] if resolved_items else None
+    
+    # If not linked or not a rec ID, return the string value
+    if isinstance(raw_value, list):
+        return ', '.join(map(str, raw_value)) if raw_value else None
+    return str(raw_value)
 
 # --- END OF common_utils.py ---

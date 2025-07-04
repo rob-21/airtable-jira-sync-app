@@ -1,11 +1,14 @@
 # main_controller.py
 import os
 import logging # Basic logging for this initial check
+import re
 from dotenv import load_dotenv, find_dotenv # Ensure find_dotenv is imported
 
 # --- Import the phase-specific run function ---
 from phase1_jira_to_airtable import run_phase1
 from phase2_airtable_to_jira import run_phase2
+from phase3_two_way_sync import run_phase3
+from qa_report import generate_qa_summary_table
 
 
 # --- Initial .env check BEFORE anything else ---
@@ -80,12 +83,11 @@ logging.basicConfig( # This reconfigures, replacing the initial basicConfig
 )
 logging.info("Main logging reconfigured.") # Test message for new config
 
-# ... (rest of your main_controller.py: initialize_clients, fetch_all_data, build_initial_mappings, main function) ...
+# ... (rest of the main_controller.py: initialize_clients, fetch_all_data, build_initial_mappings, main function) ...
 # Ensure the definitions of initialize_clients, fetch_all_data, etc. are below this point.
 # The 'main()' function call should be within the if __name__ == "__main__": block.
 
-# (Paste the rest of your main_controller.py functions here: initialize_clients, fetch_all_data, build_initial_mappings, main_logic)
-# For brevity, I'm not pasting them again, but they follow this initial block.
+
 
 # Example of where your previous functions would go:
 def initialize_clients():
@@ -114,7 +116,7 @@ def initialize_clients():
         return None, None
 
 # ... (define fetch_all_data, build_initial_mappings, and main_logic here) ...
-# (Make sure to use the correct variable names for constants from common_utils, e.g., common_utils.JIRA_PROJECT_KEY_CONFIG)
+
 def fetch_all_data(jira_client_instance, airtable_api_token_for_direct_call, airtable_base_id_for_direct_call, airtable_table_name_for_direct_call):
     all_jira_issues = []
     all_airtable_records = []
@@ -145,14 +147,17 @@ def build_initial_mappings(all_jira_issues, all_airtable_records):
         record_id = record['id']
         airtable_fields = record['fields']
         jira_key_from_airtable = airtable_fields.get(common_utils.AIRTABLE_JIRA_KEY_FIELD)
-        if jira_key_from_airtable:
-            if "/" in jira_key_from_airtable:
-                jira_key_from_airtable = jira_key_from_airtable.split("/")[-1].split("?")[0]
-            if jira_key_from_airtable in jira_key_to_airtable_id and jira_key_to_airtable_id[jira_key_from_airtable] != record_id:
-                logging.warning(f"Conflict: Jira key {jira_key_from_airtable} in Airtable record {record_id} already mapped to {jira_key_to_airtable_id[jira_key_from_airtable]}.")
+        if jira_key_from_airtable and re.match(r"^[A-Z][A-Z0-9]+-\d+$", jira_key_from_airtable.strip()):
+            jira_key = jira_key_from_airtable.strip()
+            if jira_key in jira_key_to_airtable_id and jira_key_to_airtable_id[jira_key] != record_id:
+                logging.warning(f"Conflict: Jira key {jira_key} in Airtable record {record_id} "
+                                f"is already mapped to Airtable record {jira_key_to_airtable_id[jira_key]}.")
             else:
-                jira_key_to_airtable_id[jira_key_from_airtable] = record_id
-                airtable_id_to_jira_key[record_id] = jira_key_from_airtable
+                jira_key_to_airtable_id[jira_key] = record_id
+                airtable_id_to_jira_key[record_id] = jira_key
+        elif jira_key_from_airtable:
+             # Log that we are ignoring placeholder text
+             logging.debug(f"Ignoring invalid or placeholder text in Jira Key field for Airtable record {record_id}: '{jira_key_from_airtable}'")
     for issue in all_jira_issues:
         jira_key = issue.key
         description = getattr(issue.fields, 'description', None)
@@ -170,7 +175,7 @@ def build_initial_mappings(all_jira_issues, all_airtable_records):
     logging.info(f"Built initial mappings: {len(jira_key_to_airtable_id)} Jira keys mapped, {len(airtable_id_to_jira_key)} Airtable IDs mapped.")
     return jira_key_to_airtable_id, airtable_id_to_jira_key
 
-def main_logic(): # Renamed from 'main' to avoid confusion with the __main__ block
+def main_logic():
     if common_utils.DRY_RUN:
         logging.info("<<<<< SCRIPT IS RUNNING IN DRY RUN MODE - NO LIVE CHANGES WILL BE MADE >>>>>")
     else:
@@ -184,63 +189,108 @@ def main_logic(): # Renamed from 'main' to avoid confusion with the __main__ blo
     airtable_base_id_for_bulk = os.getenv('AIRTABLE_BASE_ID')
     airtable_main_table_name_for_bulk = os.getenv('AIRTABLE_TABLE_NAME')
 
+    # 1. Fetch all raw data
     all_jira_issues_raw, all_airtable_records_raw = fetch_all_data(
         jira_client_instance, airtable_token_for_bulk, airtable_base_id_for_bulk, airtable_main_table_name_for_bulk
     )
     
-    # jira_issues_map_by_key = {issue.key: issue for issue in all_jira_issues_raw} # Not strictly needed if passing lists
-    # airtable_records_map_by_id = {record['id']: record for record in all_airtable_records_raw}
+    # 2. Create lookup maps for easier access
+    
+    jira_issues_map_by_key = {issue.key: issue for issue in all_jira_issues_raw}
+    airtable_records_map_by_id = {record['id']: record for record in all_airtable_records_raw}
+    logging.info(f"Created lookup maps: {len(jira_issues_map_by_key)} Jira issues, {len(airtable_records_map_by_id)} Airtable records.")
 
+    # 3. Build initial mappings (Jira Key <-> Airtable Record ID)
     jira_key_to_airtable_id_map, airtable_id_to_jira_key_map = build_initial_mappings(
         all_jira_issues_raw, all_airtable_records_raw
     )
+
     overall_actions_log = []
 
-     # --- Execute Phases ---
+    # --- Execute Phases ---
     if common_utils.ENABLE_PHASE1:
-    # This is the correct, active call to Phase 1
+        logging.info("--- Starting Phase 1: New Jira Issues to Airtable ---")
         actions_phase1 = run_phase1(
-        jira_client_instance,
-        airtable_token_for_bulk, 
-        airtable_base_id_for_bulk, 
-        airtable_main_table_name_for_bulk,
-        all_jira_issues_raw,
-        airtable_id_to_jira_key_map,
-        jira_key_to_airtable_id_map
-    )
-    if actions_phase1:
-        overall_actions_log.extend(actions_phase1)
+            jira_client_instance,
+            airtable_token_for_bulk, airtable_base_id_for_bulk, airtable_main_table_name_for_bulk,
+            all_jira_issues_raw,
+            airtable_id_to_jira_key_map,
+            jira_key_to_airtable_id_map
+        )
+        if actions_phase1:
+            overall_actions_log.extend(actions_phase1)
+            # In a real scenario, you might update the maps here after phase 1 runs
     else:
         logging.info("Phase 1 (Jira to Airtable) is disabled by feature flag.")
 
     if common_utils.ENABLE_PHASE2:
         logging.info("--- Starting Phase 2: New/Specified Airtable Records to Jira ---")
-        logging.warning("Phase 2 (Airtable to Jira) execution logic to be called from its module.")
+        actions_phase2 = run_phase2(
+            jira_client_instance,
+            airtable_token_for_bulk, airtable_base_id_for_bulk, airtable_main_table_name_for_bulk,
+            all_airtable_records_raw,
+            airtable_id_to_jira_key_map,
+            jira_key_to_airtable_id_map
+        )
+        if actions_phase2:
+            overall_actions_log.extend(actions_phase2)
     else:
         logging.info("Phase 2 (Airtable to Jira) is disabled by feature flag.")
 
     if common_utils.ENABLE_PHASE3:
         logging.info("--- Starting Phase 3: Two-Way Sync for Matched Items ---")
-        logging.warning("Phase 3 (Two-Way Sync) execution logic to be called from its module.")
+        # Now, the maps being passed here are defined.
+        actions_phase3 = run_phase3(
+           jira_client_instance,
+           airtable_token_for_bulk, 
+           airtable_base_id_for_bulk, 
+           airtable_main_table_name_for_bulk,
+           jira_issues_map_by_key,       # Pass the map of {key: issue_obj}
+           airtable_records_map_by_id,   # Pass the map of {id: record_obj}
+           jira_key_to_airtable_id_map   # Pass the definitive links
+        )
+        if actions_phase3:
+           overall_actions_log.extend(actions_phase3)
     else:
         logging.info("Phase 3 (Two-Way Sync) is disabled by feature flag.")
 
-    if common_utils.ENABLE_PHASE2:
-            logging.info("--- Starting Phase 2: New/Specified Airtable Records to Jira ---")
-            # This is now an active call
-            actions_phase2 = run_phase2(
-                jira_client_instance,
-                airtable_token_for_bulk, 
-                airtable_base_id_for_bulk, 
-                airtable_main_table_name_for_bulk,
-                all_airtable_records_raw, # Pass the raw list
-                airtable_id_to_jira_key_map, # Pass current state of maps
-                jira_key_to_airtable_id_map
-            )
-            if actions_phase2:
-                overall_actions_log.extend(actions_phase2)
-    else:
-            logging.info("Phase 2 (Airtable to Jira) is disabled by feature flag.")
+    
+    # --- QA Report Generation ---
+    """ if common_utils.DRY_RUN:
+        logging.info("--- Generating QA Dry Run Report ---")
+        # This is now an active call to the new module
+        generate_qa_summary_table(
+            overall_actions_log,
+            jira_issues_map_by_key,
+            airtable_records_map_by_id
+        )
+    elif overall_actions_log:
+        logging.info("--- Live Run Action Summary ---")
+        # You could have a simpler summary for live runs if desired
+        for action in overall_actions_log:
+            logging.info(f"Action: {action.get('type')} on Jira:{action.get('jira_key')}/Airtable:{action.get('airtable_id')}. Details: {action.get('actions')}")
+            if action.get('error'):
+                logging.error(f"  -> Error during action: {action.get('error')}")
+
+    logging.info("Main controller finished execution.") """
+    if common_utils.DRY_RUN:
+        logging.info("--- Generating QA Dry Run Report ---")
+        # This call now triggers the new functionality in qa_report.py
+        generate_qa_summary_table(
+            overall_actions_log,
+            jira_issues_map_by_key,
+            airtable_records_map_by_id
+        )
+    elif overall_actions_log:
+        # For live runs
+        logging.info("--- Live Run Action Summary ---")
+        generate_qa_summary_table(
+            overall_actions_log,
+            jira_issues_map_by_key,
+            airtable_records_map_by_id
+        )
+
+    logging.info("Main controller finished execution.")   
 
 if __name__ == "__main__":
     # The initial .env check and debug prints for Jira vars are already done above.

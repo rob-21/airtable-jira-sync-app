@@ -10,6 +10,12 @@ def run_phase1(jira_client, airtable_api_token, airtable_base_id, airtable_table
                airtable_id_to_jira_key_map,
                jira_key_to_airtable_id_map
                ):
+    """
+    Phase 1: Finds new Jira issues that are not in Airtable and processes them.
+    - Updates Jira issue title and status.
+    - Creates a corresponding record in Airtable.
+    - Updates the Jira issue description with the new Airtable Record ID metadata.
+    """
     logging.info("--- Executing Phase 1: New Jira Issues to Airtable ---")
     actions_log = []
     
@@ -50,7 +56,7 @@ def run_phase1(jira_client, airtable_api_token, airtable_base_id, airtable_table
             # A-1. Prepend prefix to summary
             new_summary = f"{common_utils.JIRA_NOT_EVALUATED_PREFIX_CONST} {issue.fields.summary}"
             action_details["actions"].append(f"Jira: Plan to update summary to '{new_summary}'")
-            logging.info(f"  [Plan] Jira {jira_key}: Update summary to '{new_summary}'") # <-- ADD THIS LOG
+            logging.info(f"  [Plan] Jira {jira_key}: Update summary to '{new_summary}'")
             if not common_utils.DRY_RUN:
                 issue.update(summary=new_summary)
                 logging.info(f"    [Live] Jira: Updated summary for {jira_key}.")
@@ -59,8 +65,8 @@ def run_phase1(jira_client, airtable_api_token, airtable_base_id, airtable_table
             # A-2. Set Jira Status to "Backlog"
             target_jira_status = common_utils.JIRA_NEW_ISSUE_STATUS
             current_jira_status = issue.fields.status.name
-            action_details["actions"].append(f"Jira: Current status '{current_jira_status}'. Plan to set to '{target_jira_status}'")
-            logging.info(f"  [Plan] Jira {jira_key}: Set status to '{target_jira_status}' (from '{current_jira_status}')") # <-- ADD THIS LOG
+            action_details["actions"].append(f"Jira: Plan to set status to '{target_jira_status}'")
+            logging.info(f"  [Plan] Jira {jira_key}: Set status to '{target_jira_status}' (from '{current_jira_status}')")
             if current_jira_status.lower() != target_jira_status.lower():
                 if not common_utils.DRY_RUN:
                     transition_id = common_utils.find_jira_transition_id_by_name(jira_client, jira_key, target_jira_status)
@@ -81,8 +87,16 @@ def run_phase1(jira_client, airtable_api_token, airtable_base_id, airtable_table
             continue
 
         # --- Step B: Create Airtable Record ---
+        idea_name_field = common_utils.AIRTABLE_IDEA_NAME_FIELD
+        if not idea_name_field:
+            logging.error("Phase 1: AIRTABLE_IDEA_NAME_FIELD is not set in .env. Cannot create Airtable record.")
+            action_details["error"] = "Configuration Error: AIRTABLE_IDEA_NAME_FIELD is not set."
+            actions_log.append(action_details)
+            continue 
+        
+        
         airtable_fields_to_create = {
-            common_utils.AIRTABLE_HEADLINE_FIELD: new_summary,
+            idea_name_field: f"{common_utils.JIRA_NOT_EVALUATED_PREFIX_CONST} {issue.fields.summary}",
             common_utils.AIRTABLE_STATUS_FIELD: "Idea: Backlog",
             common_utils.AIRTABLE_JIRA_KEY_FIELD: jira_key,
             common_utils.AIRTABLE_JIRA_URL_FIELD: issue.permalink()
@@ -92,23 +106,21 @@ def run_phase1(jira_client, airtable_api_token, airtable_base_id, airtable_table
             parsed_desc_data = common_utils.parse_jira_description_table_to_airtable_fields(issue.fields.description)
             airtable_fields_to_create.update(parsed_desc_data)
             action_details["actions"].append(f"Airtable: Parsed {len(parsed_desc_data)} fields from Jira description.")
-            logging.info(f"  [Plan] Airtable: Parsed {len(parsed_desc_data)} fields from Jira description.") # <-- ADD THIS LOG
+            logging.info(f"  [Plan] Airtable: Parsed {len(parsed_desc_data)} fields from Jira description.")
         
-        action_details["actions"].append(f"Airtable: Plan to create record.")
-        logging.info(f"  [Plan] Airtable: Create record with {len(airtable_fields_to_create)} fields.") # <-- ADD THIS LOG
-        if common_utils.SCRIPT_DEBUG_MODE: # Only log full data in debug mode
+        action_details["actions"].append(f"Airtable: Plan to create record with {len(airtable_fields_to_create)} fields.")
+        logging.info(f"  [Plan] Airtable: Create record with {len(airtable_fields_to_create)} fields.")
+        if common_utils.SCRIPT_DEBUG_MODE:
             logging.debug(f"    [Debug] Airtable fields to create: {json.dumps(airtable_fields_to_create, indent=2)}")
 
-        created_airtable_record_id = f"DRYRUN_REC_FOR_{jira_key}"
-        action_details["new_airtable_id"] = created_airtable_record_id
-        
+        created_airtable_record_id = None
         if not common_utils.DRY_RUN:
             try:
                 created_record = airtable_table.create(airtable_fields_to_create)
                 created_airtable_record_id = created_record['id']
                 logging.info(f"    [Live] Airtable: Created record {created_airtable_record_id} for Jira issue {jira_key}.")
-                action_details["actions"][-1] = f"Airtable: Successfully created record {created_airtable_record_id}."
-                action_details["new_airtable_id"] = created_airtable_record_id
+                action_details["actions"][-1] = f"Airtable: Successfully created record." # Cleaned up message
+                # Update maps for the current run if successful
                 jira_key_to_airtable_id_map[jira_key] = created_airtable_record_id
                 airtable_id_to_jira_key_map[created_airtable_record_id] = jira_key
             except Exception as e:
@@ -116,6 +128,10 @@ def run_phase1(jira_client, airtable_api_token, airtable_base_id, airtable_table
                 action_details["error"] = f"Airtable Create Failed: {e}"
                 actions_log.append(action_details)
                 continue
+        else: # In Dry Run
+            created_airtable_record_id = f"DRYRUN_REC_FOR_{jira_key}"
+        
+        action_details["new_airtable_id"] = created_airtable_record_id
 
         # --- Step C: Update Jira Description with New Airtable Metadata ---
         if created_airtable_record_id:
@@ -125,15 +141,18 @@ def run_phase1(jira_client, airtable_api_token, airtable_base_id, airtable_table
                 
                 metadata_lines = [f"\n\n{common_utils.METADATA_BLOCK_HEADER}"]
                 metadata_lines.append(f"{common_utils.METADATA_REC_ID_PREFIX}{created_airtable_record_id}")
-                exp_id_val = airtable_fields_to_create.get(common_utils.AIRTABLE_EXPERIMENT_ID_FIELD)
+                
+                exp_id_val = common_utils.get_experiment_wxx_txx_id(new_summary)
                 if exp_id_val:
                     metadata_lines.append(f"{common_utils.METADATA_EXP_ID_PREFIX}{exp_id_val}")
+                
                 airtable_url = f"https://airtable.com/{airtable_base_id}/{airtable_table_name}/{created_airtable_record_id}"
                 metadata_lines.append(f"{common_utils.METADATA_URL_PREFIX}{airtable_url}")
+                
                 updated_jira_description = current_jira_desc_cleaned + "\n" + "\n".join(metadata_lines)
 
                 action_details["actions"].append("Jira: Plan to update description with Airtable metadata.")
-                logging.info("  [Plan] Jira: Update description with Airtable metadata.") # <-- ADD THIS LOG
+                logging.info("  [Plan] Jira: Update description with Airtable metadata.")
                 if common_utils.SCRIPT_DEBUG_MODE:
                     logging.debug(f"    [Debug] New Jira description metadata block:\n" + "\n".join(metadata_lines))
                 
@@ -141,6 +160,7 @@ def run_phase1(jira_client, airtable_api_token, airtable_base_id, airtable_table
                     issue.update(description=updated_jira_description)
                     logging.info(f"    [Live] Jira: Updated description for {jira_key} with Airtable metadata.")
                     action_details["actions"][-1] = "Jira: Successfully updated description with Airtable metadata."
+            
             except Exception as e:
                 logging.error(f"Phase 1: Failed during Jira description update for {jira_key}: {e}")
                 action_details["error"] = f"Jira Description Update Failed: {e}"

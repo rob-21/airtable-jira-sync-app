@@ -29,45 +29,27 @@ def run_phase2(jira_client, airtable_api_token, airtable_base_id, airtable_table
         record_id = record['id']
         airtable_fields = record.get('fields', {})
 
-        # Filter 1: Skip if already linked
-        if record_id in airtable_id_to_jira_key_map:
-            logging.debug(f"Phase 2: Airtable record {record_id} is already linked. Skipping.")
-            continue
-
-        # Filter 2: Skip if status is not in the creation list
+        if record_id in airtable_id_to_jira_key_map: continue
         current_airtable_status = airtable_fields.get(common_utils.AIRTABLE_STATUS_FIELD)
-        if not current_airtable_status or current_airtable_status not in common_utils.AIRTABLE_STATUSES_FOR_JIRA_CREATION_LIST:
-            logging.debug(f"Phase 2: Airtable record {record_id} has status '{current_airtable_status}', which is not in the creation list. Skipping.")
-            continue
+        if not current_airtable_status or current_airtable_status not in common_utils.AIRTABLE_STATUSES_FOR_JIRA_CREATION_LIST: continue
         
         processed_airtable_record_count += 1
         headline_from_airtable = airtable_fields.get(common_utils.AIRTABLE_HEADLINE_FIELD)
-        
-        sanitized_headline = headline_from_airtable.replace('\n', ' ').strip() if headline_from_airtable else ""
-        logging.info(f"Phase 2: Found new Airtable record to process: {record_id} (\"{sanitized_headline}\")")
+        logging.info(f"Phase 2: Found new Airtable record to process: {record_id} ('{headline_from_airtable}')")
+        action_details = { "phase": 2, "type": "Airtable->Jira (New)", "airtable_id": record_id, "airtable_summary": headline_from_airtable, "actions": [], "new_jira_key": None, "error": None }
 
-        action_details = {
-            "phase": 2, "type": "Airtable->Jira (New)", "airtable_id": record_id,
-            "airtable_summary": headline_from_airtable, "actions": [], "new_jira_key": None, "error": None
-        }
-
-        # --- Step A: Prepare Jira Issue Data ---
         try:
-            # A-1. Jira Summary is a direct copy from Airtable's "Full Name" field.
             if not headline_from_airtable:
-                logging.warning(f"Airtable record {record_id} is missing its 'Full Name' ({common_utils.AIRTABLE_HEADLINE_FIELD}). Skipping.")
+                logging.warning(f"Airtable record {record_id} is missing its 'Full Name'. Skipping.")
                 action_details["error"] = f"Missing '{common_utils.AIRTABLE_HEADLINE_FIELD}' in Airtable."
                 actions_log.append(action_details)
                 continue
             
             target_jira_headline = headline_from_airtable
-
-            # A-2. Construct Jira Description (Table + Metadata)
             full_jira_description = common_utils.format_full_jira_description(
                 record_id, airtable_fields, common_utils.AIRTABLE_BASE_ID_CONFIG, common_utils.AIRTABLE_TABLE_NAME_CONFIG
             )
 
-            # A-3. Prepare the full issue dictionary
             issue_dict = {
                 'project': {'key': common_utils.JIRA_PROJECT_KEY_CONFIG},
                 'summary': target_jira_headline,
@@ -75,38 +57,52 @@ def run_phase2(jira_client, airtable_api_token, airtable_base_id, airtable_table
                 'issuetype': {'name': common_utils.JIRA_ISSUE_TYPE_NAME_CONFIG},
                 'labels': [common_utils.JIRA_CRO_LABEL]
             }
+
+            # --- ADD CUSTOM FIELDS AND DATES TO THE CREATION DICTIONARY ---
+            custom_fields = True
+            if custom_fields:
+                if common_utils.JIRA_CLUSTER_CF:
+                    goal_raw = airtable_fields.get(common_utils.AIRTABLE_GOAL_FIELD)
+                    goal_value = common_utils.get_resolved_value_for_sync(goal_raw, common_utils.AIRTABLE_GOAL_IS_LINKED, common_utils.AIRTABLE_GOAL_LINKED_TABLE, common_utils.AIRTABLE_GOAL_DISPLAY_FIELD)
+                    if goal_value: issue_dict[common_utils.JIRA_CLUSTER_CF] = {'value': goal_value}
+
+                if common_utils.JIRA_AFFECTED_COUNTRY_CF:
+                    country_iso_raw = airtable_fields.get(common_utils.AIRTABLE_COUNTRY_FIELD)
+                    country_iso = common_utils.get_resolved_value_for_sync(country_iso_raw, common_utils.AIRTABLE_SITE_IS_LINKED, common_utils.AIRTABLE_SITE_LINKED_TABLE, common_utils.AIRTABLE_SITE_DISPLAY_FIELD)
+                    if country_iso:
+                        country_name = common_utils.COUNTRY_ISO_TO_NAME.get(country_iso.upper())
+                        if country_name: issue_dict[common_utils.JIRA_AFFECTED_COUNTRY_CF] = [{'value': country_name}]
+
+                if common_utils.JIRA_REQUIRED_DATE_CF:
+                    start_date = airtable_fields.get(common_utils.AIRTABLE_PLANNED_START_DATE_FIELD)
+                    if start_date: issue_dict[common_utils.JIRA_REQUIRED_DATE_CF] = common_utils.format_date_for_jira(start_date)
+                
+                if common_utils.JIRA_DUE_DATE_CF:
+                    end_date = airtable_fields.get(common_utils.AIRTABLE_ESTIMATED_END_DATE_FIELD)
+                    if end_date: issue_dict[common_utils.JIRA_DUE_DATE_CF] = common_utils.format_date_for_jira(end_date)
+            # --- END OF NEW LOGIC ---
+
             action_details["actions"].append(f"Jira: Plan to create issue with summary '{target_jira_headline}'.")
-            logging.info(f"Phase 2: Creating Jira issue with summary \"{sanitized_headline}\"")
-
-            if common_utils.SCRIPT_DEBUG_MODE:
-                logging.debug(f"    [Debug] Full Jira issue data to be created: {json.dumps(issue_dict, indent=2)}")
-
+            logging.info(f"  [Plan] Jira: Create issue with summary '{target_jira_headline}'")
+            if common_utils.SCRIPT_DEBUG_MODE: logging.debug(f"    [Debug] Full Jira issue data to be created: {json.dumps(issue_dict, indent=2)}")
         except Exception as e:
             logging.error(f"Phase 2: Failed during Jira data preparation for Airtable record {record_id}: {e}", exc_info=True)
             action_details["error"] = f"Jira Data Prep Failed: {e}"
             actions_log.append(action_details)
             continue
 
-        # --- Step B: Create Jira Issue (or simulate) ---
         created_jira_issue_key = f"DRYRUN_JIRA_FOR_{record_id}"
-        action_details["actions"].append(f"Jira: DRY RUN - Would create issue.")
-        logging.info(f"  [Plan] Jira: Create issue.")
-        
         if not common_utils.DRY_RUN:
             try:
                 new_issue = jira_client.create_issue(fields=issue_dict)
                 created_jira_issue_key = new_issue.key
-                logging.info(f"    [Live] Jira: Successfully created issue {created_jira_issue_key} for Airtable record {record_id}.")
-                action_details["actions"][-1] = f"Jira: Successfully created issue {created_jira_issue_key}."
             except Exception as e:
                 logging.error(f"    [Live] Jira: Failed to create issue for Airtable record {record_id}: {e}")
                 action_details["error"] = f"Jira Create Failed: {e}"
                 actions_log.append(action_details)
                 continue
-        
         action_details["new_jira_key"] = created_jira_issue_key
 
-        # --- Step C: Set Status on Newly Created Jira Issue ---
         if created_jira_issue_key:
             target_jira_status = common_utils.STATUS_MAPPING_AIRTABLE_TO_JIRA.get(current_airtable_status)
             if target_jira_status:
@@ -117,19 +113,9 @@ def run_phase2(jira_client, airtable_api_token, airtable_base_id, airtable_table
                     if transition_id:
                         try:
                             jira_client.transition_issue(created_jira_issue_key, transition_id)
-                            logging.info(f"    [Live] Jira: Transitioned {created_jira_issue_key} to '{target_jira_status}'.")
-                            action_details["actions"][-1] = f"Jira: Successfully set status to '{target_jira_status}'."
                         except Exception as e:
                             logging.error(f"    [Live] Jira: Failed to transition {created_jira_issue_key}: {e}")
-                            action_details["actions"][-1] = f"Jira: ERROR setting status: {e}"
-                    else:
-                        logging.warning(f"    [Live] Jira: No transition found to '{target_jira_status}' for new issue {created_jira_issue_key}.")
-                        action_details["actions"][-1] = f"Jira: WARNING - No transition found to '{target_jira_status}'."
-            else:
-                logging.warning(f"No Jira status mapping found for Airtable status '{current_airtable_status}'.")
-                action_details["actions"].append(f"Jira: WARNING - No status mapping for '{current_airtable_status}'.")
 
-        # --- Step D: Update Airtable Record with Jira Key/URL ---
         if os.getenv('ENABLE_AIRTABLE_UPDATES', 'False').lower() == 'true' and created_jira_issue_key:
             fields_to_update = {
                 common_utils.AIRTABLE_JIRA_KEY_FIELD: created_jira_issue_key,
@@ -140,15 +126,12 @@ def run_phase2(jira_client, airtable_api_token, airtable_base_id, airtable_table
             if not common_utils.DRY_RUN:
                 try:
                     airtable_table.update(record_id, fields_to_update)
-                    logging.info(f"    [Live] Airtable: Successfully updated record {record_id}.")
-                    action_details["actions"][-1] = f"Airtable: Successfully updated with Jira key."
                 except Exception as e:
                     logging.error(f"    [Live] Airtable: Failed to update record {record_id}: {e}")
                     action_details["error"] = f"Airtable Update Failed: {e}"
         else:
             action_details["actions"].append(f"Airtable: Update is disabled by flag or Jira issue not created.")
-            logging.info(f"  [Plan] Airtable: Update for record {record_id} is disabled by ENABLE_AIRTABLE_UPDATES flag or creation failure.")
-
+        
         actions_log.append(action_details)
 
     logging.info(f"Phase 2 finished. Processed {processed_airtable_record_count} new Airtable records.")
